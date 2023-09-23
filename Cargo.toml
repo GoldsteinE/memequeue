@@ -9,7 +9,7 @@ edition = "2021"
 libc = "0.2.148"
 once_cell = "1.18.0"
 rand = "0.8.5"
-serde = { version = "1.0.188", features = ["derive"] }
+serde = { version = "1.0.188", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = "1.2.0"

@@ -38,12 +38,7 @@ impl ShmemRawMutex {
 
     pub(crate) fn wait(&self) {
         let futex = self.futex();
-        loop {
-            if futex.load(Ordering::Relaxed) == 0 {
-                return;
-            }
-            futex_wait(futex, 1);
-        }
+        futex_wait(futex, 1);
     }
 }
 
