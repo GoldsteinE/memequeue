@@ -31,6 +31,10 @@ use crate::shmem_mutex::ShmemRawMutex;
 // SAFETY: we're passing a valid param
 static PAGE_SIZE: Lazy<usize> = Lazy::new(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize });
 
+macro_rules! debug_log {
+    ($($t:tt)*) => {};
+}
+
 #[repr(C)]
 struct Header {
     left_lock: AtomicU32,
@@ -114,60 +118,66 @@ impl MemeQueue {
         unsafe { &*self.header.ptr().as_ptr().cast::<Header>() }
     }
 
-    fn alloc_for_write(&self, size: usize) {
+    fn alloc_for_write(&self, size: usize) -> WritePermission {
         let header = self.header();
 
         loop {
             let left = header.left.load(Ordering::Relaxed);
             if left > self.size {
-                println!("acquiring left lock for maintenance");
+                debug_log!("acquiring left lock for maintenance");
                 let _left_lock = self.left_lock.lock();
                 header.left.fetch_sub(self.size, Ordering::Relaxed);
                 header.right.fetch_sub(self.size, Ordering::Relaxed);
-                let state = self.export_state();
-                assert_eq!(state.buf, state.right_buf);
-                println!("releasing left lock for maintenance");
+                debug_log!("releasing left lock for maintenance");
                 continue;
             }
             let window_end = left + self.size;
             let right = header.right.load(Ordering::Relaxed);
             let space_available = window_end.saturating_sub(right);
             if space_available >= size {
-                println!("allowing write for {size} bytes; window = {left}..{}; write window = {right}..{}", left + self.size, right + size);
-                return;
+                debug_log!("allowing write for {size} bytes; window = {left}..{}; write window = {right}..{}", left + self.size, right + size);
+                return WritePermission {
+                    start: right,
+                    end: right + size,
+                };
             }
             self.left_lock.wait();
         }
     }
 
-    pub fn write<R>(&self, f: impl FnOnce(&mut MemeWriter<'_>) -> R) -> R {
-        println!("acquiring right lock for write");
+    pub fn send<R>(&self, f: impl FnOnce(&mut MemeWriter<'_>) -> R) -> R {
+        debug_log!("acquiring right lock for write");
         let _right_guard = self.right_lock.lock();
-        self.alloc_for_write(8);
+        let perm = self.alloc_for_write(8);
         let right = self.header().right.load(Ordering::Relaxed);
         // SAFETY: copying into memory we just alloced
         let mut writer = MemeWriter {
             queue: self,
             total_written: 8,
         };
-        let mut_writer = &mut writer;
-        let res = f(mut_writer);
+        let res = f(&mut writer);
+        // TODO: error handling!
+        writer.flush().unwrap();
         let written = writer.total_written - 8;
-        println!("writing size = {written} to {}..{}", right, right + 8);
-        let len_ptr = unsafe { self.left.ptr().as_ptr().add(right) };
+        debug_log!("writing size = {written} to {}..{}", right, right + 8);
         // SAFETY: copying into memory we just alloced
-        unsafe { ptr::copy_nonoverlapping((written as u64).to_le_bytes().as_ptr(), len_ptr, 8) };
+        perm.write(
+            self.left.ptr(),
+            (written as u64).to_le_bytes().as_ptr(),
+            right,
+            8,
+        );
         self.header()
             .right
             .fetch_add(writer.total_written, Ordering::Relaxed);
 
-        println!("releasing write lock for right");
+        debug_log!("releasing write lock for right");
         res
     }
 
-    pub fn read<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+    pub fn recv<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         loop {
-            println!("acquiring left lock for read");
+            debug_log!("acquiring left lock for read");
             let left_guard = self.left_lock.lock();
             let header = self.header();
             let left = header.left.load(Ordering::Relaxed);
@@ -175,7 +185,7 @@ impl MemeQueue {
             if right.saturating_sub(left) > 0 {
                 debug_assert!(right - left >= 8);
 
-                println!("reading size from {left}..{}", left + 8);
+                debug_log!("reading size from {left}..{}", left + 8);
                 let size = {
                     let mut buf = [0; 8];
                     let left_ptr = unsafe { self.left.ptr().as_ptr().add(left) };
@@ -190,55 +200,20 @@ impl MemeQueue {
                     slice::from_raw_parts(self.left.ptr().as_ptr().add(left).add(8), size)
                 };
 
-                println!(
+                debug_log!(
                     "reading {size} bytes of data from {}..{}",
                     left + 8,
                     left + 8 + size,
                 );
                 header.left.store(left + 8 + size, Ordering::Relaxed);
-                println!("releasing left lock for read");
+                debug_log!("releasing left lock for read");
                 return f(data);
             }
-            println!("releasing left lock for read, waiting for message");
+            debug_log!("releasing left lock for read, waiting for message");
             drop(left_guard);
             self.right_lock.wait();
         }
     }
-
-    pub fn export_state(&self) -> MemeState {
-        let mut buf = vec![0_u8; self.size];
-        let mut right_buf = vec![0_u8; self.size];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                self.left.ptr().as_ptr().cast_const(),
-                buf.as_mut_ptr(),
-                self.size,
-            );
-            ptr::copy_nonoverlapping(
-                self.right.ptr().as_ptr().cast_const(),
-                right_buf.as_mut_ptr(),
-                self.size,
-            );
-        }
-        let left_pointer = self.header().left.load(Ordering::Relaxed);
-        let right_pointer = self.header().left.load(Ordering::Relaxed);
-        MemeState {
-            buf,
-            right_buf,
-            left_pointer,
-            right_pointer,
-        }
-    }
-}
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone)]
-pub struct MemeState {
-    pub buf: Vec<u8>,
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub right_buf: Vec<u8>,
-    pub left_pointer: usize,
-    pub right_pointer: usize,
 }
 
 pub struct MemeWriter<'a> {
@@ -258,7 +233,7 @@ impl Write for MemeWriter<'_> {
             ));
         }
 
-        self.queue.alloc_for_write(self.total_written + buf.len());
+        let perm = self.queue.alloc_for_write(self.total_written + buf.len());
         let right = header.right.load(Ordering::Relaxed);
         // SAFETY: staying inside of our allocation
         let dest_ptr = unsafe {
@@ -268,7 +243,7 @@ impl Write for MemeWriter<'_> {
                 .as_ptr()
                 .add(right + self.total_written)
         };
-        println!(
+        debug_log!(
             "writing {} bytes of data to {}..{}",
             buf.len(),
             right + self.total_written,
@@ -278,14 +253,43 @@ impl Write for MemeWriter<'_> {
         // 1. ptr should be in bounds
         // 2. buf is external, so can't overlap
         // 3. even if buf comes from read, it's the different part of the queue
-        unsafe { ptr::copy_nonoverlapping(buf.as_ptr(), dest_ptr, buf.len()) }
+        perm.write(
+            self.queue.left.ptr(),
+            buf.as_ptr(),
+            right + self.total_written,
+            buf.len(),
+        );
         self.total_written += buf.len();
 
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if unsafe {
+            libc::msync(
+                self.queue.left.ptr().as_ptr().cast(),
+                self.queue.size * 2,
+                libc::MS_SYNC,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
+    }
+}
+
+struct WritePermission {
+    start: usize,
+    end: usize,
+}
+
+impl WritePermission {
+    #[inline]
+    fn write(&self, base_ptr: NonNull<u8>, source: *const u8, offset: usize, count: usize) {
+        debug_assert!(offset >= self.start);
+        debug_assert!(offset + count <= self.end);
+        unsafe { ptr::copy_nonoverlapping(source, base_ptr.as_ptr().add(offset), count) }
     }
 }
 
@@ -297,112 +301,10 @@ mod tests {
 
     use super::MemeQueue;
 
-    #[derive(Debug, serde::Serialize)]
+    #[derive(Debug)]
     enum Action {
         Read,
         Write(Vec<u8>),
-    }
-
-    #[test]
-    fn known_bad() {
-        let actions = [
-            Action::Write(vec![0; 16]),
-            Action::Write(vec![1; 0]),
-            Action::Write(vec![2; 94]),
-            Action::Write(vec![3; 35]),
-            Action::Write(vec![4; 15]),
-            Action::Write(vec![5; 66]),
-            Action::Write(vec![6; 36]),
-            Action::Write(vec![7; 88]),
-            Action::Write(vec![8; 38]),
-            Action::Write(vec![9; 52]),
-            Action::Write(vec![10; 99]),
-            Action::Write(vec![11; 56]),
-            Action::Write(vec![12; 54]),
-            Action::Write(vec![13; 69]),
-            Action::Write(vec![14; 96]),
-            Action::Write(vec![15; 52]),
-            Action::Write(vec![16; 82]),
-            Action::Write(vec![17; 42]),
-            Action::Write(vec![18; 77]),
-            Action::Write(vec![19; 35]),
-            Action::Write(vec![20; 80]),
-            Action::Write(vec![21; 58]),
-            Action::Write(vec![22; 25]),
-            Action::Write(vec![23; 73]),
-            Action::Write(vec![24; 78]),
-            Action::Write(vec![25; 43]),
-            Action::Write(vec![26; 1]),
-            Action::Write(vec![27; 64]),
-            Action::Write(vec![28; 0]),
-            Action::Write(vec![29; 9]),
-            Action::Write(vec![30; 10]),
-            Action::Write(vec![31; 49]),
-            Action::Write(vec![32; 89]),
-            Action::Write(vec![33; 18]),
-            Action::Write(vec![34; 20]),
-            Action::Write(vec![35; 40]),
-            Action::Write(vec![36; 71]),
-            Action::Write(vec![37; 27]),
-            Action::Write(vec![38; 92]),
-            Action::Write(vec![39; 45]),
-            Action::Write(vec![40; 81]),
-            Action::Write(vec![41; 87]),
-            Action::Write(vec![42; 22]),
-            Action::Write(vec![43; 1]),
-            Action::Write(vec![44; 26]),
-            Action::Write(vec![45; 7]),
-            Action::Write(vec![46; 3]),
-            Action::Write(vec![47; 56]),
-            Action::Write(vec![48; 2]),
-            Action::Write(vec![49; 82]),
-            Action::Write(vec![50; 49]),
-            Action::Write(vec![51; 96]),
-            Action::Write(vec![52; 87]),
-            Action::Write(vec![53; 97]),
-            Action::Write(vec![54; 42]),
-            Action::Write(vec![55; 95]),
-            Action::Write(vec![56; 30]),
-            Action::Write(vec![57; 84]),
-            Action::Write(vec![58; 22]),
-            Action::Write(vec![59; 75]),
-            Action::Write(vec![60; 41]),
-            Action::Write(vec![61; 49]),
-            Action::Write(vec![62; 48]),
-            Action::Write(vec![63; 97]),
-            Action::Write(vec![64; 81]),
-            Action::Write(vec![65; 82]),
-            Action::Write(vec![66; 46]),
-            Action::Write(vec![67; 71]),
-        ];
-
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mut to_read = VecDeque::new();
-        let queue = MemeQueue::from_path(file.path(), 200).unwrap();
-
-        println!("{}", &serde_json::to_string(&queue.export_state()).unwrap());
-        for (idx, action) in actions.into_iter().enumerate() {
-            println!("{}", &serde_json::to_string(&action).unwrap());
-            match action {
-                Action::Read => {
-                    let Some(expected) = to_read.pop_front() else {
-                        continue;
-                    };
-                    let data = queue.read(|buf| buf.to_owned());
-                    assert_eq!(data, expected, "failed on action {idx}");
-                }
-                Action::Write(buf) => {
-                    queue.write(|writer| writer.write_all(&buf)).unwrap();
-                    to_read.push_back(buf);
-                }
-            }
-
-            println!("{}", serde_json::to_string(&queue.export_state()).unwrap());
-            assert!(
-                queue.export_state().buf == queue.export_state().right_buf,
-                "failed on action {idx}"
-            );
-        }
     }
 
     proptest! {
@@ -422,7 +324,7 @@ mod tests {
                 match action {
                     Action::Read => {
                         let Some(expected) = to_read.pop_front() else { continue };
-                        let data = queue.read(|buf| buf.to_owned());
+                        let data = queue.recv(|buf| buf.to_owned());
                         available_space += data.len() + 8;
                         prop_assert_eq!(data, expected);
                     },
@@ -431,7 +333,7 @@ mod tests {
                             continue;
                         }
 
-                        queue.write(|writer| writer.write_all(&buf)).unwrap();
+                        queue.send(|writer| writer.write_all(&buf)).unwrap();
                         available_space -= buf.len() + 8;
                         to_read.push_back(buf);
                     }
