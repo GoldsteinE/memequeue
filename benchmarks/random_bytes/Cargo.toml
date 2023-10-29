@@ -1,0 +1,34 @@
+[package]
+name = "random_bytes_bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "meme"
+
+[[bin]]
+name = "uds_tokio_framed"
+
+[dependencies]
+rand = { version = "0.8.5", default-features = false, features = ["std"] }
+rand_xorshift = "0.3.0"
+memequeue = { path = "../.." }
+crc = "3.0.1"
+nix = { version = "0.27.1", features = ["time"] }
+humansize = "2.1.3"
+clap = { version = "4.4.7", features = ["derive"] }
+futures = "0.3.29"
+
+# Patched tokio time!
+# Stock tokio forces an extra allocation when sending length-prefixed messages,
+# and we want to be fair, so we patch it.
+# See: https://github.com/tokio-rs/tokio/issues/6116
+[dependencies.tokio]
+git = "https://github.com/GoldsteinE/tokio.git"
+branch = "length-delimited-borrowed"
+features = ["rt", "rt-multi-thread", "macros", "net"]
+
+[dependencies.tokio-util]
+git = "https://github.com/GoldsteinE/tokio.git"
+branch = "length-delimited-borrowed"
+features = ["codec"]
