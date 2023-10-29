@@ -1,12 +1,23 @@
-use std::{fs::File, io, os::fd::AsRawFd, ptr, sync::OnceLock};
+use std::{
+    fs::File,
+    io,
+    os::fd::AsRawFd,
+    ptr,
+    sync::atomic::{self, AtomicUsize},
+};
 
 pub(crate) fn get_page_size() -> usize {
-    static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+    static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
-    *PAGE_SIZE.get_or_init(|| {
-        usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) })
-            .expect("page size must fit into usize")
-    })
+    let mut page_size = PAGE_SIZE.load(atomic::Ordering::Relaxed);
+    if page_size == 0 {
+        // SAFETY: a valid sysconf call
+        page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) })
+            .expect("page size must fit in usize");
+        PAGE_SIZE.store(page_size, atomic::Ordering::Relaxed);
+    }
+
+    page_size
 }
 
 pub struct Mmap {
