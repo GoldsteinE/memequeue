@@ -8,7 +8,7 @@ use memequeue::{MemeQueue, ShmemFutexControl};
 
 use random_bytes_bench::{args, MessageGenerator, MessageValidator};
 
-const QUEUE_SIZE: usize = 4096 * 32;
+const QUEUE_SIZE: usize = 4096 * 1024;
 
 fn main() -> io::Result<()> {
     let args = args::parse();
