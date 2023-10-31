@@ -44,7 +44,7 @@ impl MessageValidator {
         message.check();
     }
 
-    pub fn report(&self) {
+    pub fn report(&mut self) {
         self.stats.report()
     }
 }

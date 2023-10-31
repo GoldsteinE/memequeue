@@ -46,7 +46,13 @@ impl<C: Control> MemeQueue<C> {
         loop {
             let guard = self.control.lock(Side::Left);
             let left_offset = self.control.load_offset(Side::Left);
-            let right_offset = self.control.sync_load_offset(Side::Right);
+            let right_offset = {
+                let cached = self.control.cached_offset(Side::Right);
+                match cached {
+                    Some(cached) if cached > left_offset => cached,
+                    _ => self.control.sync_load_offset(Side::Right),
+                }
+            };
 
             if right_offset > left_offset {
                 debug_assert!((right_offset - left_offset) as usize > mem::size_of::<usize>());
@@ -130,8 +136,15 @@ impl<C: Control> Write for MemeWriter<'_, C> {
         let right = &self.queue.right;
 
         loop {
-            let left_offset = control.sync_load_offset(Side::Left);
             let right_offset = self.right_offset + self.total_written;
+            let left_offset = match control.cached_offset(Side::Left) {
+                Some(offset)
+                    if offset as usize + left.size() > right_offset as usize + buf.len() =>
+                {
+                    offset
+                }
+                _ => control.sync_load_offset(Side::Left),
+            };
 
             let end = left
                 .as_ptr()

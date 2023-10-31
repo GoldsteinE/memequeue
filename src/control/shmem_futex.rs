@@ -8,18 +8,22 @@ use crate::{
     mmap::Mmap,
 };
 
-// Maybe align to cache line to improve cache hits?
-#[repr(C)]
+// Aligned to cache line to improve cache hits.
+#[repr(C, align(128))]
 struct Half {
     offset: AtomicU32,
     lock: AtomicU32,
-    waiters: AtomicU32,
+    cached_other_offset: AtomicU32,
 }
 
 #[repr(C)]
 struct Header {
     left: Half,
     right: Half,
+    // Waiters live outside of both cache lines, because they're commonly
+    // needed by both sides.
+    left_waiters: AtomicU32,
+    right_waiters: AtomicU32,
 }
 
 pub struct ShmemFutexControl {
@@ -41,6 +45,14 @@ impl ShmemFutexControl {
             Side::Right => &header.right,
         }
     }
+
+    fn waiters(&self, side: Side) -> &AtomicU32 {
+        let header = self.header();
+        match side {
+            Side::Left => &header.left_waiters,
+            Side::Right => &header.right_waiters,
+        }
+    }
 }
 
 pub struct ShmemFutexGuard<'a> {
@@ -53,7 +65,17 @@ impl Control for ShmemFutexControl {
         Self: 'a;
 
     fn from_header(header: Mmap) -> Self {
-        Self { header }
+        let this = Self { header };
+        let header = this.header();
+        header
+            .left
+            .cached_other_offset
+            .store(u32::MAX, Ordering::Relaxed);
+        header
+            .right
+            .cached_other_offset
+            .store(u32::MAX, Ordering::Relaxed);
+        this
     }
 
     fn lock(&self, side: Side) -> Self::Guard<'_> {
@@ -73,15 +95,16 @@ impl Control for ShmemFutexControl {
 
     fn wait(&self, side: Side, expected: u32) {
         let half = self.half(side);
-        half.waiters.fetch_add(1, Ordering::AcqRel); // TODO: ordering
+        let waiters = self.waiters(side);
+        waiters.fetch_add(1, Ordering::AcqRel); // TODO: ordering
         futex_wait(&half.offset, expected);
-        half.waiters.fetch_sub(1, Ordering::Release);
+        waiters.fetch_sub(1, Ordering::Release);
     }
 
     fn notify(&self, side: Side) {
         let half = self.half(side);
         // TODO: ordering
-        if half.waiters.load(Ordering::Acquire) != 0 {
+        if self.waiters(side).load(Ordering::Acquire) != 0 {
             futex_wake(&half.offset, 1);
         }
     }
@@ -91,7 +114,20 @@ impl Control for ShmemFutexControl {
     }
 
     fn sync_load_offset(&self, side: Side) -> u32 {
-        self.half(side).offset.load(Ordering::Acquire)
+        let res = self.half(side).offset.load(Ordering::Acquire);
+        self.half(side.other())
+            .cached_other_offset
+            .store(res, Ordering::Relaxed);
+        res
+    }
+
+    fn cached_offset(&self, side: Side) -> Option<u32> {
+        let cached = self
+            .half(side.other())
+            .cached_other_offset
+            .load(Ordering::Relaxed);
+
+        (cached != u32::MAX).then_some(cached)
     }
 
     fn commit_offset(&self, side: Side, offset: u32) {
@@ -102,6 +138,14 @@ impl Control for ShmemFutexControl {
         let header = self.header();
         header.left.offset.store(left_offset, Ordering::Relaxed);
         header.right.offset.store(right_offset, Ordering::Relaxed);
+        header
+            .left
+            .cached_other_offset
+            .store(right_offset, Ordering::Relaxed);
+        header
+            .right
+            .cached_other_offset
+            .store(left_offset, Ordering::Relaxed);
     }
 }
 

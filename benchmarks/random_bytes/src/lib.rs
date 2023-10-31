@@ -73,7 +73,7 @@ impl MessageValidator {
         assert_eq!(CRC.checksum(payload), checksum);
     }
 
-    pub fn report(&self) {
+    pub fn report(&mut self) {
         self.stats.report()
     }
 }

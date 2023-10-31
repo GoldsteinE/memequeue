@@ -30,6 +30,7 @@ pub trait Control {
 
     fn load_offset(&self, side: Side) -> u32;
     fn sync_load_offset(&self, side: Side) -> u32;
+    fn cached_offset(&self, side: Side) -> Option<u32>;
     fn commit_offset(&self, side: Side, offset: u32);
     fn fix_offsets(&self, left_offset: u32, right_offset: u32);
 }

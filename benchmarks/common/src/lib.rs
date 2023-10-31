@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fs::File, time::Duration};
 
 // First digits (after decimal) of pi in hex.
 #[rustfmt::skip]
@@ -9,12 +9,14 @@ pub const RNG_SEED: [u8; 16] = [
     0x8a, 0x2e, 0x03, 0x70,
 ];
 
+#[derive(Debug, serde::Serialize)]
 pub struct ValidatorStats {
     latencies: Vec<u64>,
     got_bytes: usize,
     got_messages: usize,
     first_msg_at: Option<u64>,
     last_msg_at: Option<u64>,
+    #[serde(skip)]
     clock: quanta::Clock,
 }
 
@@ -60,6 +62,21 @@ impl ValidatorStats {
         let latency_ns = self.clock.delta_as_nanos(0, latency_cycles);
         eprintln!("average latency: {latency_ns}ns / {latency_cycles} raw");
 
+        let mut latencies = self.latencies.clone();
+        latencies.sort();
+        eprint!("percentiles: ");
+        for p in ["50", "95", "99", "99.9"] {
+            let r: f64 = p.parse().unwrap();
+            let idx = (latencies.len() as f64 * (r / 100.0)) as usize;
+            let latency_cycles = latencies[idx];
+            let latency_ns = self.clock.delta_as_nanos(0, latency_cycles);
+            eprint!("p{p}: {latency_ns}ns / {latency_cycles} raw, ");
+        }
+
+        let latency_cycles = *latencies.last().unwrap();
+        let latency_ns = self.clock.delta_as_nanos(0, latency_cycles);
+        eprintln!("max {latency_ns}ns / {latency_cycles} raw");
+
         let total_time = Duration::from_nanos(self.total_time());
         let total_bytes = self.got_bytes;
         eprintln!(
@@ -78,5 +95,13 @@ impl ValidatorStats {
             "...that's {:.2} per second",
             self.got_messages as f64 / total_time.as_secs_f64(),
         );
+
+        if std::env::var("MEME_BENCH_DUMP_RAW").is_ok() {
+            let now = self.clock.raw();
+            let fname = format!("bench_data.{now}.json");
+            let file = File::create(&fname).unwrap();
+            serde_json::to_writer(file, &self).unwrap();
+            eprintln!("dumped raw data to `{fname}`");
+        }
     }
 }
