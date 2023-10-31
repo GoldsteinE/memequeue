@@ -537,6 +537,7 @@ dependencies = [
  "rand",
  "rand_xorshift",
  "serde",
+ "smallvec",
  "tokio",
  "tokio-util",
 ]
@@ -700,6 +701,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f92a496fb766b417c996b9c5e57daf2f7ad3b0bebe1ccfca4856390e3d3bb67"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "smallvec"
+version = "1.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "942b4a808e05215192e39f4ab80813e599068285906cc91aa64f923db842bd5a"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

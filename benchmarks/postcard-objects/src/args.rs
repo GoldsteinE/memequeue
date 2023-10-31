@@ -12,6 +12,8 @@ pub enum Command {
 pub struct Args {
     pub file_name: PathBuf,
     pub count: usize,
+    #[clap(short, long)]
+    pub batch_size: Option<usize>,
     #[clap(subcommand)]
     pub command: Command,
 }

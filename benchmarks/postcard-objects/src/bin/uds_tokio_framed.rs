@@ -1,13 +1,16 @@
 use std::{io, path::Path};
 
 use futures::{sink::SinkExt as _, StreamExt as _};
-use postcard_objects_bench::{args, MessageGenerator, MessageValidator};
+use postcard_objects_bench::{args, model::MarketInfo, MessageGenerator, MessageValidator};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args = args::parse();
+    if args.batch_size.is_some() {
+        panic!("uds_tokio_framed doesn't support batched mode yet, sorry");
+    }
     match args.command {
         args::Command::Recv => recv(&args.file_name, args.count).await,
         args::Command::Send => send(&args.file_name, args.count).await,
@@ -45,7 +48,7 @@ async fn recv(file_name: &Path, count: usize) -> io::Result<()> {
         let Some(buf) = stream.next().await else {
             continue;
         };
-        validator.check_message(&buf?);
+        validator.check_message::<MarketInfo>(&buf?);
     }
 
     validator.report();

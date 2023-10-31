@@ -1,5 +1,6 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Side {
@@ -15,6 +16,11 @@ impl Side {
             Side::Sell
         }
     }
+}
+
+pub trait Message {
+    fn time(&self) -> u64;
+    fn check(&self);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,8 +56,42 @@ impl MarketInfo {
     fn set_checksum(&mut self) {
         self.checksum = self.calculate_checksum();
     }
+}
 
-    pub fn check(&self) {
+impl Message for MarketInfo {
+    fn time(&self) -> u64 {
+        self.time
+    }
+
+    fn check(&self) {
         assert_eq!(self.checksum, self.calculate_checksum());
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Batch<M> {
+    // TODO: arbitrarily chosen, is there a way to do better?
+    pub inner: SmallVec<[M; 16]>,
+    pub time: u64,
+    pub size: usize,
+}
+
+impl<M> Batch<M> {
+    pub fn new(inner: SmallVec<[M; 16]>, time: u64) -> Self {
+        let size = inner.len();
+        Self { inner, time, size }
+    }
+}
+
+impl<M: Message> Message for Batch<M> {
+    fn time(&self) -> u64 {
+        self.time
+    }
+
+    fn check(&self) {
+        assert_eq!(self.inner.len(), self.size);
+        for m in &self.inner {
+            m.check();
+        }
     }
 }

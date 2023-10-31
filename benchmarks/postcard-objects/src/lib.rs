@@ -1,9 +1,11 @@
+use self::model::Message;
 use benchmarks_common::ValidatorStats;
 use rand::SeedableRng as _;
 use rand_xorshift::XorShiftRng;
+use serde::Deserialize;
 
-pub mod model;
 pub mod args;
+pub mod model;
 
 pub struct MessageGenerator {
     rng: XorShiftRng,
@@ -37,10 +39,10 @@ impl MessageValidator {
         }
     }
 
-    pub fn check_message(&mut self, buf: &[u8]) {
+    pub fn check_message<'de, M: Message + Deserialize<'de>>(&mut self, buf: &'de [u8]) {
         let now = self.stats.time();
-        let message: model::MarketInfo = postcard::from_bytes(buf).unwrap();
-        self.stats.record_message(message.time, now, buf.len());
+        let message: M = postcard::from_bytes(buf).unwrap();
+        self.stats.record_message(message.time(), now, buf.len());
         message.check();
     }
 
