@@ -1,7 +1,7 @@
 use std::{io, path::Path};
 
 use futures::{sink::SinkExt as _, StreamExt as _};
-use random_bytes_bench::{args, MessageGenerator, MessageValidator};
+use postcard_objects_bench::{args, MessageGenerator, MessageValidator};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
@@ -9,27 +9,25 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 async fn main() -> io::Result<()> {
     let args = args::parse();
     match args.command {
-        args::Command::Recv { count } => recv(&args.file_name, count).await,
-        args::Command::Send {
-            count,
-            min_size,
-            max_size,
-        } => send(&args.file_name, count, min_size, max_size).await,
+        args::Command::Recv => recv(&args.file_name, args.count).await,
+        args::Command::Send => send(&args.file_name, args.count).await,
     }
 }
 
-async fn send(file_name: &Path, count: usize, min_size: usize, max_size: usize) -> io::Result<()> {
+async fn send(file_name: &Path, count: usize) -> io::Result<()> {
     let mut stream = FramedWrite::new(
         UnixStream::connect(file_name).await?,
         LengthDelimitedCodec::new(),
     );
-    let mut gen = MessageGenerator::new(min_size);
-    let mut buf = vec![0; max_size];
+    let mut gen = MessageGenerator::new();
+    // `Encoder` interface doesn't actually allow to get rid of this buffer.
+    let mut buf = Vec::with_capacity(1024);
 
     for _ in 0..count {
-        let size = gen.gen_message(&mut buf);
-        let message = &buf[..size];
-        stream.feed(message).await?;
+        let message = gen.gen_message();
+        buf.clear();
+        postcard::to_io(&message, &mut buf).unwrap();
+        stream.feed(&*buf).await?;
     }
 
     stream.close().await?;

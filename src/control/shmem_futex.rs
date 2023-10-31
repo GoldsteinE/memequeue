@@ -8,12 +8,18 @@ use crate::{
     mmap::Mmap,
 };
 
+// Maybe align to cache line to improve cache hits?
+#[repr(C)]
+struct Half {
+    offset: AtomicU32,
+    lock: AtomicU32,
+    waiters: AtomicU32,
+}
+
 #[repr(C)]
 struct Header {
-    left_offset: AtomicU32,
-    right_offset: AtomicU32,
-    left_lock: AtomicU32,
-    right_lock: AtomicU32,
+    left: Half,
+    right: Half,
 }
 
 pub struct ShmemFutexControl {
@@ -28,19 +34,11 @@ impl ShmemFutexControl {
         unsafe { &*self.header.as_ptr().cast() }
     }
 
-    fn offset(&self, side: Side) -> &AtomicU32 {
+    fn half(&self, side: Side) -> &Half {
         let header = self.header();
         match side {
-            Side::Left => &header.left_offset,
-            Side::Right => &header.right_offset,
-        }
-    }
-
-    fn futex(&self, side: Side) -> &AtomicU32 {
-        let header = self.header();
-        match side {
-            Side::Left => &header.left_lock,
-            Side::Right => &header.right_lock,
+            Side::Left => &header.left,
+            Side::Right => &header.right,
         }
     }
 }
@@ -59,7 +57,7 @@ impl Control for ShmemFutexControl {
     }
 
     fn lock(&self, side: Side) -> Self::Guard<'_> {
-        let futex = self.futex(side);
+        let futex = &self.half(side).lock;
 
         if futex
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
@@ -74,27 +72,36 @@ impl Control for ShmemFutexControl {
     }
 
     fn wait(&self, side: Side, expected: u32) {
-        futex_wait(self.offset(side), expected);
+        let half = self.half(side);
+        half.waiters.fetch_add(1, Ordering::AcqRel); // TODO: ordering
+        futex_wait(&half.offset, expected);
+        half.waiters.fetch_sub(1, Ordering::Release);
     }
 
     fn notify(&self, side: Side) {
-        futex_wake(self.offset(side), 1);
+        let half = self.half(side);
+        // TODO: ordering
+        if half.waiters.load(Ordering::Acquire) != 0 {
+            futex_wake(&half.offset, 1);
+        }
     }
 
     fn load_offset(&self, side: Side) -> u32 {
-        self.offset(side).load(Ordering::Relaxed)
+        self.half(side).offset.load(Ordering::Relaxed)
     }
 
     fn sync_load_offset(&self, side: Side) -> u32 {
-        self.offset(side).load(Ordering::Acquire)
-    }
-
-    fn store_offset(&self, side: Side, offset: u32) {
-        self.offset(side).store(offset, Ordering::Relaxed)
+        self.half(side).offset.load(Ordering::Acquire)
     }
 
     fn commit_offset(&self, side: Side, offset: u32) {
-        self.offset(side).store(offset, Ordering::Release)
+        self.half(side).offset.store(offset, Ordering::Release)
+    }
+
+    fn fix_offsets(&self, left_offset: u32, right_offset: u32) {
+        let header = self.header();
+        header.left.offset.store(left_offset, Ordering::Relaxed);
+        header.right.offset.store(right_offset, Ordering::Relaxed);
     }
 }
 

@@ -82,6 +82,7 @@ impl<C: Control> MemeQueue<C> {
         let mut writer = MemeWriter {
             queue: self,
             total_written: 0,
+            right_offset: self.control.load_offset(Side::Right),
         };
         // Space for size
         writer.write_all(&[0; mem::size_of::<usize>()])?;
@@ -89,7 +90,7 @@ impl<C: Control> MemeQueue<C> {
 
         if res.is_ok() {
             let message_size = writer.total_written as usize - mem::size_of::<usize>();
-            let right_offset = self.control.load_offset(Side::Right);
+            let right_offset = writer.right_offset;
             // SAFETY: we keep offsets in bounds
             unsafe {
                 let right_ptr = self.left.as_ptr().add(right_offset as usize);
@@ -107,6 +108,7 @@ impl<C: Control> MemeQueue<C> {
 pub struct MemeWriter<'a, C> {
     queue: &'a MemeQueue<C>,
     total_written: u32,
+    right_offset: u32,
 }
 
 impl<C: Control> Write for MemeWriter<'_, C> {
@@ -129,7 +131,7 @@ impl<C: Control> Write for MemeWriter<'_, C> {
 
         loop {
             let left_offset = control.sync_load_offset(Side::Left);
-            let right_offset = control.load_offset(Side::Right) + self.total_written;
+            let right_offset = self.right_offset + self.total_written;
 
             let end = left
                 .as_ptr()
@@ -155,11 +157,10 @@ impl<C: Control> Write for MemeWriter<'_, C> {
             } else if left_offset as usize >= left.size() {
                 let _left_guard = control.lock(Side::Left);
                 let left_offset = control.load_offset(Side::Left);
-                control.store_offset(Side::Left, left_offset - left.size() as u32);
-                control.store_offset(
-                    Side::Right,
-                    right_offset - self.total_written - left.size() as u32,
-                );
+                let new_left_offset = left_offset - left.size() as u32;
+                let new_right_offset = right_offset - self.total_written - left.size() as u32;
+                control.fix_offsets(new_left_offset, new_right_offset);
+                self.right_offset = new_right_offset;
             } else {
                 control.wait(Side::Left, left_offset);
             }

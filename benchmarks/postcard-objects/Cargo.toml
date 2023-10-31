@@ -1,7 +1,11 @@
 [package]
-name = "random_bytes_bench"
+name = "postcard-objects-bench"
 version = "0.1.0"
 edition = "2021"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
 
 [[bin]]
 name = "meme"
@@ -10,17 +14,17 @@ name = "meme"
 name = "uds_tokio_framed"
 
 [dependencies]
-memequeue = { path = "../.." }
+memequeue = { version = "0.1.0", path = "../.." }
 benchmarks_common = { version = "0.1.0", path = "../common" }
 
-rand = { version = "0.8.5", default-features = false, features = ["std"] }
-rand_xorshift = "0.3.0"
-crc = "3.0.1"
-nix = { version = "0.27.1", features = ["time"] }
-humansize = "2.1.3"
 clap = { version = "4.4.7", features = ["derive"] }
 futures = "0.3.29"
+postcard = { version = "1.0.8", features = ["use-crc", "use-std"] }
 quanta = "0.12.0"
+rand = { version = "0.8.5", default-features = false, features = ["std"] }
+rand_xorshift = "0.3.0"
+serde = { version = "1.0.190", features = ["derive"] }
+
 
 # Patched tokio time!
 # Stock tokio forces an extra allocation when sending length-prefixed messages,
