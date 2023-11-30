@@ -1,47 +1,81 @@
 #![allow(dead_code)]
 
 use std::{
-    fs::File,
     io::{self, Write},
     mem, slice,
 };
 
-pub use crate::control::{Control, ShmemFutexControl};
-use crate::{control::Side, mmap::Mmap};
+pub use crate::control::{
+    Control, EventFdControl, EventFdControlConfig, ShmemFutexControl, ShmemFutexControlConfig,
+};
+use crate::{control::Side, handshake::HandshakeResult, mmap::Mmap};
 
 mod control;
+pub mod handshake;
 mod mmap;
 
-pub struct MemeQueue<C> {
+#[cfg(feature = "stats")]
+pub mod stats;
+
+#[macro_export]
+macro_rules! debug_output {
+    // ($($t:tt)*) => { eprintln!($($t)*) }
+    ($($t:tt)*) => {}
+    // ($($t:tt)*) => {
+    //     unsafe {
+    //         use std::fmt::Write as _;
+    //         $crate::DEBUG.clear();
+    //         $crate::DEBUG.write_fmt(format_args!($($t)*)).unwrap();
+    //     }
+    // }
+}
+
+pub struct MemeQueue<H, C> {
+    // Note: field order is important, as it ensures proper drop order.
     control: C,
     left: Mmap,
     right: Mmap,
-    // TODO: hide it behind generic somehow?
-    file: File,
+    handshake_result: H,
 }
 
-impl<C: Control> MemeQueue<C> {
-    // TODO: should't exist
-    /// # Safety
-    /// none.
-    pub unsafe fn from_file(file: File, queue_size: usize, master: bool) -> io::Result<Self> {
-        let mmaps = if master {
-            mmap::QueueMmaps::create_from_file(&file, queue_size)?
-        } else {
-            mmap::QueueMmaps::from_fd(&file, queue_size)?
-        };
-        let control = C::from_header(mmaps.header);
-        Ok(Self {
-            control,
-            left: mmaps.left,
-            right: mmaps.right,
-            file,
-        })
+impl<H: HandshakeResult, C: Control<H>> MemeQueue<H, C> {
+    pub fn new(handshake_result: H) -> io::Result<Self>
+    where
+        C::Config: Default,
+    {
+        Self::with_config(handshake_result, C::Config::default())
     }
 
-    pub fn recv<R, F>(&self, cb: F) -> R
+    pub fn with_config(mut handshake_result: H, config: C::Config) -> io::Result<Self> {
+        // SAFETY: guaranteed by `HandshakeResult`s contract.
+        let mmap::QueueMmaps {
+            left,
+            right,
+            header,
+        } = unsafe {
+            mmap::QueueMmaps::from_fd(&handshake_result.shmem_fd(), handshake_result.queue_size())?
+        };
+        let control = C::new(config, header, &mut handshake_result)?;
+        handshake_result.mark_ready()?;
+        Ok(Self {
+            control,
+            left,
+            right,
+            handshake_result,
+        })
+    }
+}
+
+impl<H, C: Control<H>> MemeQueue<H, C> {
+    #[cfg(feature = "stats")]
+    pub fn stats(&self) -> &crate::stats::Stats {
+        self.control.stats()
+    }
+
+    pub fn recv<R, E, F>(&self, cb: F) -> Result<R, E>
     where
-        F: FnOnce(&[u8]) -> R,
+        F: FnOnce(&[u8]) -> Result<R, E>,
+        E: From<io::Error>,
     {
         loop {
             let guard = self.control.lock(Side::Left);
@@ -65,23 +99,28 @@ impl<C: Control> MemeQueue<C> {
                     slice
                 };
                 let res = cb(slice);
+                // TODO: should we commit offset if callback failed?
                 self.control.commit_offset(
                     Side::Left,
                     left_offset + mem::size_of::<usize>() as u32 + slice.len() as u32,
                 );
                 drop(guard);
-                self.control.notify(Side::Left);
+                debug_output!("notifying left about {}", left_offset + mem::size_of::<usize>() as u32 + slice.len() as u32);
+                // Error safety: we already commited offset and will return soon regardless.
+                self.control.notify(Side::Left)?;
                 return res;
             } else {
                 drop(guard);
-                self.control.wait(Side::Right, right_offset);
+                // Error safety: we're not in the middle of some operation,
+                // so failing is OK.
+                self.control.wait(Side::Right, right_offset)?;
             }
         }
     }
 
     pub fn send<R, E, F>(&self, cb: F) -> Result<R, E>
     where
-        F: FnOnce(&mut MemeWriter<'_, C>) -> Result<R, E>,
+        F: FnOnce(&mut MemeWriter<'_, H, C>) -> Result<R, E>,
         E: From<io::Error>,
     {
         let _guard = self.control.lock(Side::Right);
@@ -104,20 +143,22 @@ impl<C: Control> MemeQueue<C> {
             };
             self.control
                 .commit_offset(Side::Right, right_offset + writer.total_written);
-            self.control.notify(Side::Right);
+            // Error safety: we commited offset and will return soon regardless
+            debug_output!("notifying right about {}", right_offset + writer.total_written);
+            self.control.notify(Side::Right)?;
         }
 
         res
     }
 }
 
-pub struct MemeWriter<'a, C> {
-    queue: &'a MemeQueue<C>,
+pub struct MemeWriter<'a, H, C> {
+    queue: &'a MemeQueue<H, C>,
     total_written: u32,
     right_offset: u32,
 }
 
-impl<C: Control> Write for MemeWriter<'_, C> {
+impl<H, C: Control<H>> Write for MemeWriter<'_, H, C> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let next_total_written = self.total_written as u64 + buf.len() as u64;
         if next_total_written > u32::MAX as u64
@@ -175,7 +216,12 @@ impl<C: Control> Write for MemeWriter<'_, C> {
                 control.fix_offsets(new_left_offset, new_right_offset);
                 self.right_offset = new_right_offset;
             } else {
-                control.wait(Side::Left, left_offset);
+                // Error safety: there're two cases.
+                // 1. If caller propagates the error, we won't commit anything, so it's safe.
+                // 2. If caller hides the error, we will commit everything we've written.
+                //    Size is calculated by `.total_written`, which is synchronized with actual
+                //    bytes written, so it's ok, although the message will obviously be malformed.
+                control.wait(Side::Left, left_offset)?;
             }
         }
     }

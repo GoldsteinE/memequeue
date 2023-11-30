@@ -1,13 +1,13 @@
 use std::{
-    io::{self, Write as _},
+    io,
+    os::unix::net::{UnixListener, UnixStream},
     path::Path,
 };
 
-use memequeue::{MemeQueue, ShmemFutexControl};
-
+use benchmarks_common::framing::StdBufFraming;
 use random_bytes_bench::{args, MessageGenerator, MessageValidator};
 
-const QUEUE_SIZE: usize = 4096 * 1024;
+const BUF_SIZE: usize = 4096 * 1024;
 
 fn main() -> io::Result<()> {
     let args = args::parse();
@@ -22,28 +22,25 @@ fn main() -> io::Result<()> {
 }
 
 fn send(file_name: &Path, count: usize, min_size: usize, max_size: usize) -> io::Result<()> {
-    let queue = MemeQueue::<_, ShmemFutexControl>::new(unsafe {
-        memequeue::handshake::named_file(file_name, QUEUE_SIZE)?
-    })?;
+    let mut stream = StdBufFraming::new(BUF_SIZE, UnixStream::connect(file_name)?);
     let mut gen = MessageGenerator::new(min_size);
     let mut buf = vec![0; max_size];
 
     for _ in 0..count {
         let size = gen.gen_message(&mut buf);
-        queue.send(|writer| writer.write_all(&buf[..size]))?;
+        stream.write_message(&buf[..size])?;
     }
 
     Ok(())
 }
 
 fn recv(file_name: &Path, count: usize) -> io::Result<()> {
-    let queue = MemeQueue::<_, ShmemFutexControl>::new(unsafe {
-        memequeue::handshake::named_file(file_name, QUEUE_SIZE)?
-    })?;
+    let listener = UnixListener::bind(file_name)?;
+    let mut stream = StdBufFraming::new(BUF_SIZE, listener.accept()?.0);
     let mut validator = MessageValidator::new(count);
 
     for _ in 0..count {
-        queue.recv(|buf| validator.check_message(buf));
+        stream.read_message(|buf| validator.check_message(buf))?;
     }
 
     validator.report();

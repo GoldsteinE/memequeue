@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io,
     os::fd::AsRawFd,
     ptr,
@@ -56,7 +55,7 @@ pub(crate) struct QueueMmaps {
 
 impl QueueMmaps {
     /// # Safety
-    /// `fd` must point to a file which has enough space for `PAGE_SIZE + queue_size * 2` bytes.
+    /// `fd` must point to a file which has enough space for `PAGE_SIZE + queue_size` bytes.
     #[rustfmt::skip]
     pub(crate) unsafe fn from_fd<F: AsRawFd>(fd: &F, queue_size: usize) -> io::Result<Self> {
         use libc::{
@@ -145,19 +144,5 @@ impl QueueMmaps {
                 size: page_size,
             },
         })
-    }
-
-    /// # Safety
-    /// No one else can access the file while this function is executing.
-    pub(crate) unsafe fn create_from_file(file: &File, queue_size: usize) -> io::Result<Self> {
-        let page_size = get_page_size();
-        file.set_len((page_size + queue_size * 2) as u64)?;
-        // SAFETY: we just set the file size.
-        let mmaps = unsafe { Self::from_fd(file, queue_size)? };
-        // SAFETY: header is page-sized.
-        unsafe {
-            mmaps.header.ptr.write_bytes(0, page_size);
-        }
-        Ok(mmaps)
     }
 }

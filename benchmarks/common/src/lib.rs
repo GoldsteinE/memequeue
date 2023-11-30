@@ -1,5 +1,7 @@
 use std::{fs::File, time::Duration};
 
+pub mod framing;
+
 // First digits (after decimal) of pi in hex.
 #[rustfmt::skip]
 pub const RNG_SEED: [u8; 16] = [
@@ -9,7 +11,7 @@ pub const RNG_SEED: [u8; 16] = [
     0x8a, 0x2e, 0x03, 0x70,
 ];
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidatorStats {
     latencies: Vec<u64>,
     got_bytes: usize,
@@ -97,10 +99,14 @@ impl ValidatorStats {
         );
 
         if std::env::var("MEME_BENCH_DUMP_RAW").is_ok() {
-            let now = self.clock.raw();
+            let mut this = self.clone();
+            for latency in &mut this.latencies {
+                *latency = this.clock.delta_as_nanos(0, *latency);
+            }
+            let now = this.clock.raw();
             let fname = format!("bench_data.{now}.json");
             let file = File::create(&fname).unwrap();
-            serde_json::to_writer(file, &self).unwrap();
+            serde_json::to_writer(file, &this).unwrap();
             eprintln!("dumped raw data to `{fname}`");
         }
     }

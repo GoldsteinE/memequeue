@@ -3,8 +3,17 @@ name = "memequeue"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+debug = true
+
+[features]
+stats = []
+handshake_uds_memfd = ["dep:nix", "nix/socket", "nix/uio"]
+
 [dependencies]
 libc = "0.2.149"
+nix = { version = "0.27.1", optional = true }
+quanta = "0.12.1"
 
 [dev-dependencies]
 rand = "0.8.5"

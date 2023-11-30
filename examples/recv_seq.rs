@@ -1,6 +1,6 @@
-use std::{fs::File, io, mem};
+use std::{io, mem};
 
-use memequeue::{MemeQueue, ShmemFutexControl};
+use memequeue::{EventFdControl, MemeQueue};
 
 fn check_buf(buf: &[u8]) {
     assert!(buf.len() >= mem::size_of::<usize>());
@@ -14,17 +14,17 @@ fn check_buf(buf: &[u8]) {
 }
 
 fn main() -> io::Result<()> {
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open("/dev/shm/test.queue")?;
-
-    let consumer = unsafe { MemeQueue::<ShmemFutexControl>::from_file(file, 4096, true)? };
+    let consumer = MemeQueue::<_, EventFdControl>::new(memequeue::handshake::uds_memfd(
+        "/tmp/memequeue-uds",
+        4096,
+    )?)?;
+    eprintln!("negotiation complete, created recv queue");
 
     loop {
-        consumer.recv(check_buf);
+        consumer.recv(|buf| {
+            check_buf(buf);
+            io::Result::Ok(())
+        })?;
         // std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }

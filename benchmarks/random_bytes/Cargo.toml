@@ -9,6 +9,9 @@ name = "meme"
 [[bin]]
 name = "uds_tokio_framed"
 
+[[bin]]
+name = "uds_std_buf"
+
 [dependencies]
 memequeue = { path = "../.." }
 benchmarks_common = { version = "0.1.0", path = "../common" }

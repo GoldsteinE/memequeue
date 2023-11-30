@@ -1,4 +1,4 @@
-use std::{fs::File, io, mem, path::Path};
+use std::{io, mem, path::Path};
 
 use memequeue::{MemeQueue, ShmemFutexControl};
 
@@ -20,9 +20,9 @@ fn main() -> io::Result<()> {
 }
 
 fn send(file_name: &Path, count: usize, batch_size: Option<usize>) -> io::Result<()> {
-    let queue = unsafe {
-        MemeQueue::<ShmemFutexControl>::from_file(open_file(file_name)?, QUEUE_SIZE, false)?
-    };
+    let queue = MemeQueue::<_, ShmemFutexControl>::new(unsafe {
+        memequeue::handshake::named_file(file_name, QUEUE_SIZE)?
+    })?;
     let mut gen = MessageGenerator::new();
     let mut batch_buf = SmallVec::new();
     let clock = quanta::Clock::new();
@@ -51,13 +51,16 @@ fn send(file_name: &Path, count: usize, batch_size: Option<usize>) -> io::Result
         }
     }
 
+    #[cfg(feature = "stats")]
+    eprintln!("queue stats: {:?}", queue.stats());
+
     Ok(())
 }
 
 fn recv(file_name: &Path, count: usize, batch_size: Option<usize>) -> io::Result<()> {
-    let queue = unsafe {
-        MemeQueue::<ShmemFutexControl>::from_file(open_file(file_name)?, QUEUE_SIZE, true)?
-    };
+    let queue = MemeQueue::<_, ShmemFutexControl>::new(unsafe {
+        memequeue::handshake::named_file(file_name, QUEUE_SIZE)?
+    })?;
     let mut validator = MessageValidator::new(count);
 
     for _ in 0..count {
@@ -67,19 +70,14 @@ fn recv(file_name: &Path, count: usize, batch_size: Option<usize>) -> io::Result
             } else {
                 validator.check_message::<Batch<MarketInfo>>(buf);
             }
-        });
+            io::Result::Ok(())
+        })?;
     }
 
     validator.report();
 
-    Ok(())
-}
+    #[cfg(feature = "stats")]
+    eprintln!("queue stats: {:?}", queue.stats());
 
-fn open_file(file_name: &Path) -> io::Result<File> {
-    File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(file_name)
+    Ok(())
 }

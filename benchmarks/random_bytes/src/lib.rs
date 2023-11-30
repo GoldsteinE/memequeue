@@ -33,7 +33,7 @@ impl MessageGenerator {
         let message_size = self.rng.gen_range(self.min_size..buf.len());
         let payload_size = message_size - 8;
         self.rng.fill(&mut buf[..payload_size - 8]);
-        let checksum = CRC.checksum(&buf[..payload_size]);
+        let checksum = CRC.checksum(&buf[..payload_size - 8]);
         buf[payload_size..message_size].copy_from_slice(&checksum.to_le_bytes());
         buf[payload_size - 8..payload_size].copy_from_slice(&self.clock.raw().to_le_bytes());
         message_size
@@ -64,7 +64,7 @@ impl MessageValidator {
         };
         self.stats.record_message(sent_at, now, size);
 
-        let payload = &buf[..size - 8];
+        let payload = &buf[..size - 16];
         let checksum = {
             let mut b = [0; 8];
             b.copy_from_slice(&buf[size - 8..]);
